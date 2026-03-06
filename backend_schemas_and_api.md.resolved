@@ -1,0 +1,259 @@
+# Comprehensive Backend Architecture & Database Schemas
+
+This document contains the complete database schema design and core API structure for the new Family Healthcare backend. You can use these schemas directly to spin up your new Django project.
+
+---
+
+## 1. Core Users and Clinics (`apps.users`)
+
+This module manages the clinics/hospitals and the base authentication for all users.
+
+```python
+# apps/users/models.py
+from django.db import models
+from django.contrib.auth.models import AbstractUser
+import uuid
+
+class Clinic(models.Model):
+    """Equivalent to 'Organization' in LMS. Represents a hospital or clinic instance."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    domain = models.CharField(max_length=255, unique=True)
+    contact_email = models.EmailField(blank=True)
+    contact_phone = models.CharField(max_length=20, blank=True)
+    address = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+class User(AbstractUser):
+    """Base custom user model."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    phone_number = models.CharField(max_length=20, unique=True, null=True, blank=True)
+
+class ClinicUser(models.Model):
+    """Equivalent to 'OrganizationUser'."""
+    ROLE_CHOICES = (
+        ('admin', 'Clinic Admin'),
+        ('doctor', 'Doctor / Specialist'),
+        ('patient', 'Patient / Family Member'),
+        ('guardian', 'Family Head / Guardian'),
+    )
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='clinic_profiles')
+    clinic = models.ForeignKey(Clinic, on_delete=models.CASCADE, related_name='users')
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        unique_together = ('user', 'clinic')
+
+class FamilyRelationship(models.Model):
+    """Equivalent to 'ParentStudentRelationship'."""
+    RELATIONSHIP_CHOICES = (('mother', 'Mother'), ('father', 'Father'), ('child', 'Child'), ('spouse', 'Spouse'), ('other', 'Other'))
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    guardian = models.ForeignKey(ClinicUser, on_delete=models.CASCADE, related_name='dependents', limit_choices_to={'role': 'guardian'})
+    patient = models.ForeignKey(ClinicUser, on_delete=models.CASCADE, related_name='guardians', limit_choices_to={'role': 'patient'})
+    relationship_type = models.CharField(max_length=20, choices=RELATIONSHIP_CHOICES)
+    is_primary_emergency_contact = models.BooleanField(default=False)
+```
+
+---
+
+## 2. Health Profiles (`apps.profiles`)
+
+Extends the base user with specific healthcare-related information.
+
+```python
+# apps/profiles/models.py
+from django.db import models
+
+class DoctorProfile(models.Model):
+    clinic_user = models.OneToOneField('users.ClinicUser', on_delete=models.CASCADE, limit_choices_to={'role': 'doctor'})
+    medical_registration_no = models.CharField(max_length=100, unique=True)
+    specialty = models.CharField(max_length=255)
+    qualifications = models.TextField(help_text="e.g., MBBS, MD (Cardiology)")
+    consultation_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    bio = models.TextField(blank=True)
+    availability_schedule = models.JSONField(default=dict, help_text="Weekly availability matrix")
+
+class PatientProfile(models.Model):
+    clinic_user = models.OneToOneField('users.ClinicUser', on_delete=models.CASCADE, limit_choices_to={'role': 'patient'})
+    date_of_birth = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=20, choices=[('M', 'Male'), ('F', 'Female'), ('O', 'Other')])
+    blood_group = models.CharField(max_length=5, blank=True)
+    height_cm = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    weight_kg = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    
+    # Critical Health Data
+    allergies = models.TextField(blank=True)
+    chronic_conditions = models.TextField(blank=True, help_text="e.g., Diabetes, Hypertension")
+    current_medications = models.TextField(blank=True)
+```
+
+---
+
+## 3. Appointments & Trackers (`apps.scheduling`)
+
+Handles time-based events mapping directly from your old `calendar` app.
+
+```python
+# apps/scheduling/models.py
+from django.db import models
+
+class HealthEvent(models.Model):
+    EVENT_TYPES = (
+        ('appointment', 'Doctor Appointment'),
+        ('medicine', 'Medicine Reminder'),
+        ('measurement', 'Vitals Tracker (e.g., BP check)'),
+    )
+    STATUS_CHOICES = (('scheduled', 'Scheduled'), ('completed', 'Completed'), ('cancelled', 'Cancelled'))
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey('users.ClinicUser', on_delete=models.CASCADE, related_name='health_events')
+    doctor = models.ForeignKey('users.ClinicUser', on_delete=models.SET_NULL, null=True, blank=True, related_name='appointments')
+    
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPES)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    
+    start_datetime = models.DateTimeField()
+    end_datetime = models.DateTimeField(null=True, blank=True)
+    
+    # For Medicine Trackers
+    is_recurring = models.BooleanField(default=False)
+    recurrence_rule = models.CharField(max_length=255, blank=True, help_text="RRULE string for daily/weekly pills")
+    
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+
+class ReminderNotification(models.Model):
+    event = models.ForeignKey(HealthEvent, on_delete=models.CASCADE, related_name='reminders')
+    remind_before_minutes = models.IntegerField(default=15)
+    sent = models.BooleanField(default=False)
+```
+
+---
+
+## 4. Advanced OCR Document Processing (`apps.medical_ocr`)
+
+Handles the visual extraction of data from Lab Reports and Prescriptions.
+
+```python
+# apps/medical_ocr/models.py
+from django.db import models
+
+class MedicalDocument(models.Model):
+    STATUS_CHOICES = (('uploaded', 'Uploaded'), ('processing', 'Processing OCR/NLP'), ('completed', 'Completed'), ('flagged', 'Needs Doctor Review'))
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey('users.ClinicUser', on_delete=models.CASCADE, limit_choices_to={'role': 'patient'})
+    document_type = models.CharField(max_length=50, choices=[('lab_report', 'Lab Report'), ('prescription', 'Prescription'), ('scan', 'Scan')])
+    file = models.FileField(upload_to='medical_records/')
+    
+    raw_ocr_text = models.TextField(blank=True)
+    ai_summary = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='uploaded')
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+class ExtractedMetric(models.Model):
+    """Derived directly from MedicalDocument via LLM."""
+    document = models.ForeignKey(MedicalDocument, on_delete=models.CASCADE, related_name='metrics')
+    metric_name = models.CharField(max_length=100, help_text="e.g., Fasting Blood Sugar")
+    value = models.CharField(max_length=100)
+    unit = models.CharField(max_length=50, blank=True)
+    reference_range = models.CharField(max_length=100, blank=True)
+    is_abnormal = models.BooleanField(default=False)
+    measured_date = models.DateField(null=True, blank=True)
+```
+
+---
+
+## 5. AI Health Assistant & Triaging (`apps.health_assistant`)
+
+This subsystem replaces the `study_agent` and handles chat-based symptom evaluation.
+
+```python
+# apps/health_assistant/models.py
+from django.db import models
+
+class TriageSession(models.Model):
+    SEVERITY_CHOICES = (('low', 'Routine Care'), ('medium', 'Monitor Closely'), ('high', 'Urgent / Doctor Needed'))
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    patient = models.ForeignKey('users.ClinicUser', on_delete=models.CASCADE, limit_choices_to={'role': 'patient'})
+    
+    primary_symptom = models.CharField(max_length=255, blank=True)
+    severity_assessment = models.CharField(max_length=20, choices=SEVERITY_CHOICES, blank=True)
+    
+    started_at = models.DateTimeField(auto_now_add=True)
+    is_active = models.BooleanField(default=True)
+
+class TriageMessage(models.Model):
+    session = models.ForeignKey(TriageSession, on_delete=models.CASCADE, related_name='messages')
+    sender = models.CharField(max_length=10, choices=[('patient', 'Patient'), ('ai', 'AI Assistant')])
+    content = models.TextField()
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+class ClinicalSummary(models.Model):
+    """The final payload sent to the doctor."""
+    session = models.OneToOneField(TriageSession, on_delete=models.CASCADE)
+    doctor_assigned = models.ForeignKey('users.ClinicUser', null=True, blank=True, on_delete=models.SET_NULL, limit_choices_to={'role': 'doctor'})
+    chief_complaint = models.TextField()
+    ai_analysis = models.TextField(help_text="Differential diagnosis / AI thought process")
+    recommended_action = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+```
+
+---
+
+## 6. Pre-Consultation Questionnaires (`apps.forms`)
+
+Adapted from the LMS [assessments](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/assessments/models.py#2553-2591) app.
+
+```python
+# apps/forms/models.py
+from django.db import models
+
+class Questionnaire(models.Model):
+    """Dynamic forms assigned to patients before visits."""
+    clinic = models.ForeignKey('users.Clinic', on_delete=models.CASCADE)
+    title = models.CharField(max_length=255, help_text="e.g., Initial Intake Form, Covid Screening")
+    description = models.TextField(blank=True)
+
+class Question(models.Model):
+    questionnaire = models.ForeignKey(Questionnaire, on_delete=models.CASCADE, related_name='questions')
+    question_text = models.CharField(max_length=500)
+    question_type = models.CharField(max_length=20, choices=[('text', 'Text'), ('single_choice', 'Single Choice'), ('scale', '1-10 Scale')])
+    options = models.JSONField(default=list, blank=True)
+
+class PatientSubmission(models.Model):
+    questionnaire = models.ForeignKey(Questionnaire, on_delete=models.CASCADE)
+    patient = models.ForeignKey('users.ClinicUser', on_delete=models.CASCADE)
+    answers = models.JSONField(help_text="Dict of question ID to answer payload")
+    submitted_at = models.DateTimeField(auto_now_add=True)
+```
+
+---
+
+## Key API Endpoints Roadmap (Django REST Framework)
+
+### Authentication & Profiles
+* `POST /api/auth/login/` (JWT generation)
+* `GET/PUT /api/profiles/dependents/` (Family Guardian managing kids/parents)
+* `GET/PUT /api/profiles/me/health-data/` (Managing chronic diseases, heights, weights)
+
+### OCR & Records Processing
+* `POST /api/records/upload/` (Triggers `MedicalDocument` creation & Celery Task for OCR)
+* `GET /api/records/{id}/metrics/` (Retrieves structured `ExtractedMetric` data)
+* `GET /api/records/history/` (Graphing Blood Sugar / Hemoglobin over time)
+
+### Triage Bot
+* `POST /api/triage/start/` (Initiate a new `TriageSession`)
+* `POST /api/triage/{session_id}/message/` (Send user text, trigger LLM response)
+* `GET /api/triage/doctor-queue/` (For Doctors: viewing `ClinicalSummary` objects flagged as 'high' severity)
+
+### Appointments & Reminders
+* `GET /api/calendar/doctor/{doctor_id}/slots/` (View availability)
+* `POST /api/calendar/book/` (Create `HealthEvent` for 'appointment')
+* `POST /api/calendar/medicine-tracker/` (Create `HealthEvent` for 'medicine' with RRULE recurrence)

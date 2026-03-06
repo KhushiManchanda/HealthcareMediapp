@@ -1,0 +1,113 @@
+# Overall Architectural Plan: Converting Unio LMS to a Family Healthcare App
+
+Based on the analysis of the `unio` backend, the current architecture is well-structured and highly adaptable for a healthcare ecosystem. We can effectively remap the educational concepts to healthcare domains perfectly. 
+
+Here is the detailed mapping and implementation plan for the new Family Healthcare Mobile App:
+
+---
+
+## 1. Roles & Profiles Mapping (`apps.users` and `apps.profiles`)
+
+The existing Role-Based Access Control (RBAC) and profile structures are extremely powerful and fit perfectly.
+
+| Current LMS Component | New Healthcare Component | Description & Modifications Needed |
+| :--- | :--- | :--- |
+| [Organization](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/users/models.py#10-54) | **Clinic / Hospital / App Instance** | Represents the medical entity or the platform itself. |
+| `Role: instructor` | **Role: doctor / specialist** | Medical professionals who provide care. |
+| `Role: student` | **Role: patient / family_member** | Individual family members receiving care. |
+| `Role: parent` | **Role: family_head / guardian** | The primary account holder who manages the family IDs. |
+| [ParentStudentRelationship](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/users/models.py#249-303) | **FamilyRelationship** | Links the `family_head` to multiple `family_member`s. Can repurpose `relationship_type` (Mother, Father, Child, Grandparent). |
+| [InstructorProfile](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/profiles/models.py#89-153) | **DoctorProfile** | Update fields: replace `department` with `specialty`, `employee_id` with `medical_registration_no`, add `consultation_fee`, `clinic_address`. |
+| [StudentProfile](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/profiles/models.py#8-87) | **HealthProfile** | Already has `blood_group`, `allergies`, `medical_conditions`. Add fields like `height`, [weight](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/assessments/models.py#1971-1976), `chronic_diseases`, `current_medication`. |
+
+---
+
+## 2. Communication System (`apps.communication`)
+
+The current real-time messaging system can handle doctor-patient interactions securely.
+
+*   **Direct Messaging:** Use [Conversation](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/communication/models.py#160-221) (type: direct) between the `Doctor` and the `Patient` (or Family Head on behalf of the patient). 
+*   **Media & Attachments:** Use the existing [Message](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/communication/models.py#256-329) attachments for sending Photos of symptoms, Lab Reports (PDFs), or Voice Notes to the doctor.
+*   **Announcements:** Repurpose for **Health Advisories** (e.g., flu season warnings) published by admins/doctors to all patients.
+*   **Notifications:** Utilize the robust [Notification](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/communication/models.py#417-487) and [EventReminder](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/calendar/models.py#150-200) system to send Push Notifications/SMS for upcoming appointments or overdue daily tasks.
+
+---
+
+## 3. Appointments & Medicine Tracker (`apps.calendar`)
+
+The `calendar` app handles everything time-based, making it perfect for your trackers and bookings.
+
+*   **Doctor Appointments:** 
+    *   Use [CalendarEvent](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/calendar/models.py#12-50) (event_type: 'meeting' -> 'appointment'). 
+    *   `start_datetime` and `end_datetime` mark the consultation block. 
+    *   Link the event to both the user (`Doctor`) and the attendee (`Patient`).
+*   **Medicine Tracker & Reminders:**
+    *   Create a new event type in [CalendarEvent](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/calendar/models.py#12-50): `medicine`.
+    *   Use the existing **Recurrence** (`is_recurring`, `recurrence_rule` like daily at 8 AM and 8 PM).
+    *   Use [CalendarEventReminder](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/calendar/models.py#52-71) to send push notifications to the user 5 minutes before it is time to take the medicine.
+*   **Checkup Reminders:**
+    *   Schedule long-term [CalendarEvent](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/calendar/models.py#12-50)s (e.g., "Monthly Blood Pressure Check" every month).
+
+---
+
+## 4. Questionnaires & Reports (`apps.assessments`)
+
+The [assessments](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/assessments/models.py#2553-2591) app is an incredibly rich module that you can repurpose for data collection.
+
+*   **Symptom Checkers (Quizzes):** 
+    *   Instead of "Math Quizzes", create "Pre-Consultation Questionnaires" (e.g., "Do you have a fever?", "Duration of cough?", scale 1-10 pain).
+    *   Patients fill these out before booking an appointment to give the doctor context.
+*   **Medical Report Uploads (Assignments):**
+    *   Use the `assignment` mode (`mode: upload`) where doctors can assign a "Task" to a patient (e.g., "Upload your recent Blood Test Report"). The patient uploads the file within the deadline.
+*   **Question Bank (`apps.assessments.Question`):**
+    *   Store standard medical triage questions and options in the Question Bank for reuse.
+
+---
+
+## 5. Advanced OCR-NLP Document Processing System
+
+To tackle the complexities of overwhelming health information, we will introduce a new subsystem (e.g., `medical_ocr`) for document ingestion and text comprehension.
+
+*   **Document Ingestion:** Patients upload their medical records (lab reports, prescriptions) via the Mobile App.
+*   **Legacy Flaw Fixed:** The previous "MediApp" ran separate Node and Python FastAPI servers using basic `pdfplumber` and `tesseract` to just dump raw text into GridFS. The new system replaces this fragile setup entirely into a unified Django Celery Task.
+*   **NLP Extraction (Medical Named Entity Recognition):** Raw OCR text is no longer just "summarized" but processed through LLMs to actively pull out standardized metrics (e.g., Fasting Blood Sugar = 110 mg/dL) directly mapping into the database `ExtractedMetric` schema.
+*   **Accessibility via TTS (Text-To-Speech):** Borrowing the great accessibility feature from the old app, OCR summaries will automatically generate an MP3 audio file. This allows elderly users to "listen" to their extracted medical reports!
+
+---
+
+## 6. AI Health Assistant & Triaging
+
+Building on the `study_agent` app structure, a new AI Health Assistant will address real-time symptom analysis and patient triaging.
+
+*   **Conversational Triage:** 
+    * **Legacy Flaw Fixed:** The old MediApp used a rigid, naive ML model (`joblib` Random Forest) using simple string matching ("if string matches 'headache', flag headache"). The new AI Health Assistant replaces this with a true Conversational LLM RAG engine. It understands negations ("I don't have a cough"), nuances, and avoids blurting out rigid single diagnosis outputs.
+*   **Symptom Severity Logic:** The bot will intelligently evaluate if symptoms require immediate escalation (High/Urgent care) or can be monitored (Low/Routine).
+*   **Doctor Handoff:** Complete sessions beautifully compile a "Pre-Consultation Clinical Summary" rather than expecting a doctor to read raw text. Patients are guided to book appointments immediately.
+*   **Strict Guardrails:** The system prompt will rigorously restrict the AI from explicitly prescribing drugs, acting solely as a triage & routing agent.
+
+---
+
+## Implementation Roadmap for the Mobile App
+
+### Phase 1: Consolidated Django Architecture (Backend)
+1. **Unify Microservices:** Ditch the 2nd-year approach of running Express + Mongo + 2 separate Python FastAPIs. Everything (OCR, TTS, Triage, Database) is consolidated natively inside Django (with PostgreSQL vector search). 
+2. **Migrations:** Run the migrations from our [backend_schemas_and_api.md](file:///C:/Users/Admin/.gemini/antigravity/brain/4017afcf-5848-4ed4-8bee-3ab7fce7cc2f/backend_schemas_and_api.md) script.
+3. **Setup OCR & API Endpoints:** Build the REST API layers, utilizing Django's asynchronous views and Celery tasks for heavy LLM extractions natively.
+
+### Phase 2: Mobile App Foundation (Client)
+1. Set up a React Native or Flutter mobile app inside a completely new folder/repository. 
+2. Implement Auth mapping to the existing JWT endpoints.
+3. Build the **Family Dashboard UI**, allowing a parent to switch views between different child/elder profiles.
+
+### Phase 3: Core Features Integration
+1. **Health Profiles UI:** Interface for logging weight, allergies, and blood types.
+2. **Calendar Integration:** Calendar UI for booking doctor slots and setting up repeating daily medicine reminders using the [CalendarEvent](file:///c:/Users/Admin/OneDrive/Desktop/unio/unio-backend/unio-backend/apps/calendar/models.py#12-50) endpoints.
+3. **Chat Integration:** Hook up the mobile UI to the `apps.communication` WebSockets/REST APIs so patients can message doctors securely.
+
+### Phase 4: AI & Advanced Features
+1. **Triage Bot Console:** Build the chat interface connecting to the renamed `study_agent` AI LLM. 
+2. **Pre-Consult Quizzes:** Implement the dynamic assessment forms (Quizzes) for data collection before appointments.
+3. **OCR Processing:** Allow PDF/Camera uploads in the app to parse files into health insights.
+
+## Summary
+You do not need to rewrite the backend. The core primitives you've built—users, hierarchical relationships, temporal events (calendar), structured forms (assessments), real-time chat, and AI RAG pipelines—map perfectly 1:1 to a modern family healthcare application.
