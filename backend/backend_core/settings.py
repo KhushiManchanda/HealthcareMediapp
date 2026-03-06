@@ -37,12 +37,14 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
     'users',
     'profiles',
     'scheduling',
     'medical_ocr',
     'health_assistant',
     'forms',
+    'communication',
 ]
 
 AUTH_USER_MODEL = 'users.User'
