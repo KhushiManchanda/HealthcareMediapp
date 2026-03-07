@@ -1,8 +1,11 @@
-from rest_framework import status, views
+from rest_framework import status, views, viewsets
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from .models import HealthEvent
-from users.models import ClinicUser
+from django.utils import timezone
+from datetime import datetime
+from .models import HealthEvent, ReminderNotification
+from .serializers import HealthEventSerializer, ReminderNotificationSerializer
+from .services import SchedulingService, SchedulingAggregationService
 
 class BookAppointmentView(views.APIView):
     permission_classes = [IsAuthenticated]
@@ -24,22 +27,72 @@ class BookAppointmentView(views.APIView):
             return Response({"error": "doctor_id and start_datetime are required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            doctor_profile = ClinicUser.objects.get(id=doctor_id, role='doctor')
-        except ClinicUser.DoesNotExist:
-            return Response({"error": "Invalid doctor ID provided"}, status=status.HTTP_404_NOT_FOUND)
+            appointment = SchedulingService.book_appointment(
+                patient_profile=patient_profile,
+                doctor_id=doctor_id,
+                start_datetime=start_datetime,
+                title=title
+            )
+            return Response({
+                "success": True, 
+                "message": "Appointment booked and Chat room bridged successfully.",
+                "appointment_id": appointment.id
+            }, status=status.HTTP_201_CREATED)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        appointment = HealthEvent.objects.create(
-            patient=patient_profile,
-            doctor=doctor_profile,
-            event_type='appointment',
-            title=title,
-            start_datetime=start_datetime,
-            status='scheduled'
+class HealthEventViewSet(viewsets.ModelViewSet):
+    queryset = HealthEvent.objects.all()
+    serializer_class = HealthEventSerializer
+    permission_classes = [IsAuthenticated]
+
+class ReminderNotificationViewSet(viewsets.ModelViewSet):
+    queryset = ReminderNotification.objects.all()
+    serializer_class = ReminderNotificationSerializer
+    permission_classes = [IsAuthenticated]
+
+class UnifiedCalendarView(views.APIView):
+    """
+    Unified calendar endpoint that aggregates patient/doctor events from multiple sources
+    (Analogous to Unio's apps.calendar.views.UnifiedCalendarView).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user.clinic_profiles.first()
+        if not user:
+            return Response({"error": "No associated clinical profile mapped."}, status=403)
+
+        start_str = request.query_params.get('start_date')
+        end_str = request.query_params.get('end_date')
+        types_str = request.query_params.get('types')
+
+        start_date = None
+        end_date = None
+        
+        if start_str:
+            try:
+                start_date = datetime.strptime(start_str, '%Y-%m-%d').date()
+            except ValueError:
+                pass
+
+        if end_str:
+            try:
+                end_date = datetime.strptime(end_str, '%Y-%m-%d').date()
+            except ValueError:
+                pass
+
+        event_types = [t.strip() for t in types_str.split(',')] if types_str else None
+
+        service = SchedulingAggregationService(user=user)
+        events = service.get_unified_events(
+            start_date=start_date,
+            end_date=end_date,
+            event_types=event_types
         )
 
-        # The signal in scheduling/signals.py will automatically run post_save to create a Chat Room
         return Response({
-            "success": True, 
-            "message": "Appointment booked and Chat room bridged successfully.",
-            "appointment_id": appointment.id
-        }, status=status.HTTP_201_CREATED)
+            'count': len(events),
+            'results': events
+        })
+
